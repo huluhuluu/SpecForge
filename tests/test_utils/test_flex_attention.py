@@ -145,6 +145,23 @@ class TestFlexAttention(unittest.TestCase):
             with self.subTest(seq_len=seq_len):
                 self._test_backward_pass_gradient_comparison_for_seq_len(seq_len)
 
+    def test_generate_eagle3_mask_with_sliding_window(self):
+        seq_lengths = torch.tensor([8], dtype=torch.int32)
+        mask_mod = generate_eagle3_mask(
+            seq_lengths=seq_lengths,
+            Q_LEN=8,
+            KV_LEN=8,
+            lck=0,
+            sliding_window=4,
+        )
+
+        b = torch.tensor(0, dtype=torch.int32)
+        h = torch.tensor(0, dtype=torch.int32)
+        self.assertTrue(mask_mod(b, h, torch.tensor(7), torch.tensor(7)))
+        self.assertTrue(mask_mod(b, h, torch.tensor(7), torch.tensor(4)))
+        self.assertFalse(mask_mod(b, h, torch.tensor(7), torch.tensor(3)))
+        self.assertTrue(mask_mod(b, h, torch.tensor(3), torch.tensor(0)))
+
     def _test_backward_pass_gradient_comparison_for_seq_len(self, seq_len):
         """Helper method to test backward pass gradient comparison for a specific sequence length."""
         attention = LlamaAttention(self.config).to("cuda").to(self.dtype)

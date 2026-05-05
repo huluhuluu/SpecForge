@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import json
 import math
 import os
 import time
@@ -134,6 +135,12 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
     training_group.add_argument("--batch-size", type=int, default=1)
     training_group.add_argument("--learning-rate", type=float, default=1e-4)
     training_group.add_argument("--max-length", type=int, default=2048)
+    training_group.add_argument(
+        "--draft-sliding-window",
+        type=int,
+        default=None,
+        help="If set, force the draft model to use a causal sliding-window attention of this size.",
+    )
     training_group.add_argument("--warmup-ratio", type=float, default=0.015)
     training_group.add_argument(
         "--total-steps",
@@ -403,6 +410,14 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
         print(f"Last checkpoint detected: {draft_model_last_checkpoint}")
         is_resume_checkpoint = True
 
+    if args.draft_sliding_window is not None:
+        draft_model_config.sliding_window = args.draft_sliding_window
+        draft_model_config.use_sliding_window = True
+        print_on_rank0(
+            f"Force enabling draft sliding-window attention with window size "
+            f"{args.draft_sliding_window}"
+        )
+
     if draft_model_last_checkpoint:
         draft_model = AutoEagle3DraftModel.from_pretrained(
             draft_model_last_checkpoint,
@@ -451,13 +466,15 @@ def build_dataloaders(
         f"{args.train_data_path}-"
         f"{args.max_length}-"
         f"{args.chat_template}-"
-        f"{args.target_model_path}"  # Tokenizer may also different
+        f"{args.target_model_path}-"  # Tokenizer may also different
+        f"{args.attention_backend}-"
+        f"{args.draft_sliding_window}-"
+        "jsonl-loader-v2"
     )
     cache_key = hashlib.md5(cache_params_string.encode()).hexdigest()
-    train_dataset = Dataset.from_generator(
-        generator=safe_conversations_generator,
-        gen_kwargs={"file_path": args.train_data_path},
-    )
+    with open(args.train_data_path, "r", encoding="utf-8") as f:
+        train_rows = [json.loads(line) for line in f if line.strip()]
+    train_dataset = Dataset.from_list(train_rows)
     is_online = (
         args.train_data_path is not None and args.train_hidden_states_path is None
     )
@@ -505,10 +522,9 @@ def build_dataloaders(
     )
     if args.eval_data_path is not None or args.eval_hidden_states_path is not None:
         if args.eval_data_path is not None:
-            eval_dataset = Dataset.from_generator(
-                generator=safe_conversations_generator,
-                gen_kwargs={"file_path": args.eval_data_path},
-            )
+            with open(args.eval_data_path, "r", encoding="utf-8") as f:
+                eval_rows = [json.loads(line) for line in f if line.strip()]
+            eval_dataset = Dataset.from_list(eval_rows)
             eval_eagle3_dataset = build_eagle3_dataset(
                 eval_dataset,
                 tokenizer,

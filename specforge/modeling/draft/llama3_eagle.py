@@ -536,7 +536,39 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=False
         )
+        self.sliding_window = (
+            getattr(config, "sliding_window", None)
+            if getattr(config, "use_sliding_window", False)
+            else None
+        )
         self._init_rope()
+
+    def _apply_sliding_window_bias(
+        self,
+        attn_mask: Optional[torch.Tensor],
+        *,
+        query_length: int,
+        key_length: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        if self.sliding_window is None:
+            return attn_mask
+        query_positions = torch.arange(query_length, device=device)
+        key_positions = torch.arange(key_length, device=device)
+        sliding_mask = key_positions.unsqueeze(0) < (
+            query_positions.unsqueeze(1) - self.sliding_window + 1
+        )
+        sliding_mask = sliding_mask.view(1, 1, query_length, key_length)
+        sliding_bias = torch.zeros(
+            (1, 1, query_length, key_length),
+            dtype=dtype,
+            device=device,
+        )
+        sliding_bias = sliding_bias.masked_fill(
+            sliding_mask, torch.finfo(dtype).min
+        )
+        return sliding_bias if attn_mask is None else attn_mask + sliding_bias
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
@@ -674,7 +706,13 @@ class LlamaAttention(nn.Module):
                 query_states,
                 key_states,
                 value_states,
-                attn_mask=attention_mask,
+                attn_mask=self._apply_sliding_window_bias(
+                    attention_mask,
+                    query_length=q_len,
+                    key_length=key_states.shape[-2],
+                    device=query_states.device,
+                    dtype=query_states.dtype,
+                ),
                 is_causal=attention_mask is None,
                 dropout_p=0.0,
             )
@@ -716,7 +754,14 @@ class LlamaAttention(nn.Module):
             )
             lck = len(cache_k)
 
-            attn_weights = attn_weights + attention_mask
+            attn_mask = self._apply_sliding_window_bias(
+                attention_mask,
+                query_length=q_len,
+                key_length=k0.shape[-2],
+                device=query_states.device,
+                dtype=attn_weights.dtype,
+            )
+            attn_weights = attn_weights + attn_mask
 
             for i in range(1, lck):
                 ki = cache_k[i]
@@ -840,6 +885,7 @@ class LlamaFlexAttention(LlamaAttention):
                 Q_LEN=q_len,
                 KV_LEN=key_cache.shape[-2],
                 lck=lck,
+                sliding_window=self.sliding_window,
             ),
             B=bsz,
             H=1,  # Rely on broadcast
@@ -935,6 +981,11 @@ class LlamaFlashAttention(LlamaAttention):
             dropout_p=0.0,
             softmax_scale=1.0 / math.sqrt(self.head_dim),
             causal=True,
+            window_size=(
+                (self.sliding_window - 1, 0)
+                if self.sliding_window is not None
+                else (-1, -1)
+            ),
             return_attn_probs=True,
         )
         lse = lse.transpose(1, 2)
@@ -1087,7 +1138,11 @@ class LlamaUSPFlashAttention(LlamaAttention):
             dropout_p=0.0,
             softmax_scale=1.0 / math.sqrt(self.head_dim),
             causal=True,
-            window_size=(-1, -1),
+            window_size=(
+                (self.sliding_window - 1, 0)
+                if self.sliding_window is not None
+                else (-1, -1)
+            ),
             alibi_slopes=None,
             deterministic=False,
             return_attn_probs=True,

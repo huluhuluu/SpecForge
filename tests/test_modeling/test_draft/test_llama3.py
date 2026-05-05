@@ -127,6 +127,23 @@ class TestLlamaForCausalLMEagle3Loading(unittest.TestCase):
         with self.assertRaises(AttributeError):
             LlamaForCausalLMEagle3(invalid_config)
 
+    def test_sliding_window_is_loaded_from_config(self):
+        config = LlamaConfig(
+            vocab_size=1000,
+            hidden_size=128,
+            intermediate_size=256,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=1,
+            max_position_embeddings=256,
+            sliding_window=256,
+            use_sliding_window=True,
+            draft_vocab_size=512,
+        )
+
+        model = LlamaForCausalLMEagle3(config)
+        self.assertEqual(model.midlayer.self_attn.sliding_window, 256)
+
 
 if __name__ == "__main__":
     suite = unittest.TestSuite()

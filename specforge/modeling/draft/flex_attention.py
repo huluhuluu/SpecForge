@@ -106,7 +106,11 @@ def compile_friendly_create_block_mask(
 
 
 def generate_eagle3_mask(
-    seq_lengths: torch.Tensor, Q_LEN: int, KV_LEN: int, lck: int = 0
+    seq_lengths: torch.Tensor,
+    Q_LEN: int,
+    KV_LEN: int,
+    lck: int = 0,
+    sliding_window: int | None = None,
 ):
 
     def causal_mask(b, h, q_idx, kv_idx):
@@ -114,14 +118,25 @@ def generate_eagle3_mask(
         # Shirnk the causal by diagnol
         causal_mask = q_idx >= kv_idx
         padding_mask = (kv_idx < seq_lengths[b]) & (q_idx < seq_lengths[b])
-        return causal_mask & padding_mask
+        if sliding_window is None:
+            return causal_mask & padding_mask
+        lower_bound = q_idx - sliding_window + 1
+        window_mask = kv_idx >= lower_bound
+        return causal_mask & padding_mask & window_mask
 
     def suffix_mask(b, h, q_idx, kv_idx):
         suffix_mask = kv_idx >= Q_LEN
         padding_mask = kv_idx % Q_LEN < seq_lengths[b]
         diagnol_mask = (kv_idx - q_idx) % Q_LEN == 0
-        return suffix_mask & padding_mask & diagnol_mask
+        if sliding_window is None:
+            return suffix_mask & padding_mask & diagnol_mask
+        suffix_step = kv_idx // Q_LEN
+        lower_bound = (q_idx + suffix_step * Q_LEN) - sliding_window + 1
+        window_mask = kv_idx >= lower_bound
+        return suffix_mask & padding_mask & diagnol_mask & window_mask
 
     mask_mod = or_masks(causal_mask, suffix_mask)
-    mask_mod.__name__ = f"eagle3_mask_Q_{Q_LEN}_KV_{KV_LEN}_lck_{lck}"
+    mask_mod.__name__ = (
+        f"eagle3_mask_Q_{Q_LEN}_KV_{KV_LEN}_lck_{lck}_sw_{sliding_window}"
+    )
     return mask_mod

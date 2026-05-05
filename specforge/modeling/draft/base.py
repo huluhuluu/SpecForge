@@ -41,6 +41,12 @@ class Eagle3DraftModel(PreTrainedModel, ABC):
     the abstract methods to support training with TTT.
     """
 
+    def get_sliding_window(self) -> Optional[int]:
+        if not getattr(self.config, "use_sliding_window", False):
+            return None
+        sliding_window = getattr(self.config, "sliding_window", None)
+        return sliding_window if sliding_window and sliding_window > 0 else None
+
     @abstractmethod
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -90,6 +96,34 @@ class Eagle3DraftModel(PreTrainedModel, ABC):
                 expanded_attn_mask
                 if combined_attention_mask is None
                 else expanded_attn_mask + combined_attention_mask
+            )
+
+        sliding_window = self.get_sliding_window()
+        if sliding_window is not None:
+            key_value_length = seq_length + past_key_values_length
+            query_positions = (
+                torch.arange(seq_length, device=hidden_states.device)
+                + past_key_values_length
+            )
+            key_positions = torch.arange(key_value_length, device=hidden_states.device)
+            sliding_mask = key_positions.unsqueeze(0) < (
+                query_positions.unsqueeze(1) - sliding_window + 1
+            )
+            sliding_mask = sliding_mask.view(1, 1, seq_length, key_value_length)
+            sliding_mask = sliding_mask.expand(batch_size, 1, seq_length, key_value_length)
+            sliding_mask = sliding_mask.to(hidden_states.device)
+            sliding_bias = torch.zeros(
+                (batch_size, 1, seq_length, key_value_length),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            sliding_bias = sliding_bias.masked_fill(
+                sliding_mask, torch.finfo(hidden_states.dtype).min
+            )
+            combined_attention_mask = (
+                sliding_bias
+                if combined_attention_mask is None
+                else combined_attention_mask + sliding_bias
             )
         return combined_attention_mask
 
