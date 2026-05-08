@@ -31,7 +31,10 @@ The main launch script is `examples/run_qwen3_1.7b_eagle3_online.sh`.
 cd SpecForge
 conda activate specforge
 export CUDA_VISIBLE_DEVICES=0,1,2,3
-bash examples/run_qwen3_1.7b_eagle3_online.sh 4 1
+
+mkdir -p outputs/qwen3-1.7b-eagle3-sharegpt-sw256
+bash examples/run_qwen3_1.7b_eagle3_online.sh 4 1 \
+  2>&1 | tee outputs/qwen3-1.7b-eagle3-sharegpt-sw256/train.log
 ```
 
 This command starts `scripts/train_eagle3.py` through `torchrun` with the following default arguments:
