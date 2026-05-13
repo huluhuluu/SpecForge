@@ -96,6 +96,21 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
         choices=["sglang", "hf", "custom"],
         help="The backend of the target model",
     )
+    model_group.add_argument(
+        "--enable-future-hidden",
+        "--enable-mask-hidden",
+        action="store_true",
+        dest="enable_future_hidden",
+        help="Enable future hidden conditioning with appended MASK slots.",
+    )
+    model_group.add_argument(
+        "--future-mask-token-id",
+        "--mask-token-id",
+        type=int,
+        default=None,
+        dest="future_mask_token_id",
+        help="Token ID used for appended future MASK slots.",
+    )
 
     # dataset arguments
     dataset_group = parser.add_argument_group("dataset")
@@ -251,6 +266,23 @@ def build_tracker(args: Namespace, parser: ArgumentParser) -> Tracker:
     return tracker
 
 
+def resolve_future_mask_token_id(args: Namespace) -> int:
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.target_model_path, trust_remote_code=args.trust_remote_code
+    )
+    if args.future_mask_token_id is not None:
+        return args.future_mask_token_id
+    if tokenizer.mask_token_id is not None:
+        return tokenizer.mask_token_id
+    if tokenizer.eos_token_id is not None:
+        return tokenizer.eos_token_id
+    if tokenizer.pad_token_id is not None:
+        return tokenizer.pad_token_id
+    raise ValueError(
+        "Failed to resolve a future mask token id. Set --future-mask-token-id explicitly."
+    )
+
+
 def build_target_model(
     args: Namespace, draft_model_config: AutoDraftModelConfig, is_online: bool = True
 ) -> Tuple[Union[Eagle3TargetModel, TargetHead], Optional[AutoProcessor]]:
@@ -341,6 +373,14 @@ def sanity_check(args: Namespace) -> None:
     args.target_batch_size = args.tp_size * args.batch_size
     if args.attention_backend == "usp":
         sp_sanity_check(args)
+    if args.enable_future_hidden and args.train_hidden_states_path is not None:
+        raise ValueError("Future hidden conditioning currently supports online mode only.")
+    if args.enable_future_hidden and args.is_vlm:
+        raise ValueError("Future hidden conditioning currently does not support VLM mode.")
+    if args.enable_future_hidden and args.max_length <= args.ttt_length - 1:
+        raise ValueError(
+            "max_length must be larger than ttt_length - 1 when future hidden conditioning is enabled."
+        )
 
 
 def sp_sanity_check(args: Namespace) -> None:
@@ -381,6 +421,9 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
         # Use provided config file
         draft_model_config = AutoDraftModelConfig.from_file(args.draft_model_config)
 
+    if args.enable_future_hidden:
+        draft_model_config.use_future_hidden = True
+
     # Handle base ckpt, config file
     draft_model_last_checkpoint = None
     is_resume_checkpoint = False
@@ -403,11 +446,16 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
         print(f"Last checkpoint detected: {draft_model_last_checkpoint}")
         is_resume_checkpoint = True
 
+    if args.enable_future_hidden:
+        draft_model_config.use_future_hidden = True
+
     if draft_model_last_checkpoint:
         draft_model = AutoEagle3DraftModel.from_pretrained(
             draft_model_last_checkpoint,
+            config=draft_model_config,
             attention_backend=args.attention_backend,
             torch_dtype=torch.bfloat16,
+            ignore_mismatched_sizes=args.enable_future_hidden,
         ).cuda()
     else:
         draft_model = AutoEagle3DraftModel.from_config(
@@ -441,6 +489,11 @@ def build_dataloaders(
     draft_model_config: AutoDraftModelConfig,
     processor: Optional[AutoProcessor] = None,
 ) -> Tuple[DataLoader, str, Optional[DataLoader]]:
+    dataset_max_length = (
+        args.max_length - (args.ttt_length - 1)
+        if args.enable_future_hidden
+        else args.max_length
+    )
     # build dataloaders
     tokenizer = AutoTokenizer.from_pretrained(
         args.target_model_path, trust_remote_code=args.trust_remote_code
@@ -449,14 +502,13 @@ def build_dataloaders(
     # convert to dataloader
     cache_params_string = (
         f"{args.train_data_path}-"
-        f"{args.max_length}-"
+        f"{dataset_max_length}-"
         f"{args.chat_template}-"
         f"{args.target_model_path}"  # Tokenizer may also different
     )
     cache_key = hashlib.md5(cache_params_string.encode()).hexdigest()
-    train_dataset = Dataset.from_generator(
-        generator=safe_conversations_generator,
-        gen_kwargs={"file_path": args.train_data_path},
+    train_dataset = Dataset.from_list(
+        list(safe_conversations_generator(file_path=args.train_data_path))
     )
     is_online = (
         args.train_data_path is not None and args.train_hidden_states_path is None
@@ -466,7 +518,7 @@ def build_dataloaders(
             dataset=train_dataset,
             tokenizer=tokenizer,
             chat_template=args.chat_template,
-            max_length=args.max_length,
+            max_length=dataset_max_length,
             cache_dir=os.path.join(args.cache_dir, "processed_dataset"),
             cache_key=cache_key,
             is_vlm=args.is_vlm,
@@ -486,7 +538,7 @@ def build_dataloaders(
         if not is_online:
             train_eagle3_dataset = build_offline_eagle3_dataset(
                 args.train_hidden_states_path,
-                args.max_length,
+                dataset_max_length,
                 ttt_length=args.ttt_length,
                 use_usp_preprocess=(args.attention_backend == "usp"),
             )
@@ -505,15 +557,14 @@ def build_dataloaders(
     )
     if args.eval_data_path is not None or args.eval_hidden_states_path is not None:
         if args.eval_data_path is not None:
-            eval_dataset = Dataset.from_generator(
-                generator=safe_conversations_generator,
-                gen_kwargs={"file_path": args.eval_data_path},
+            eval_dataset = Dataset.from_list(
+                list(safe_conversations_generator(file_path=args.eval_data_path))
             )
             eval_eagle3_dataset = build_eagle3_dataset(
                 eval_dataset,
                 tokenizer,
                 args.chat_template,
-                args.max_length,
+                dataset_max_length,
                 is_vlm=args.is_vlm,
                 processor=processor,
                 num_proc=args.build_dataset_num_proc,
@@ -523,7 +574,7 @@ def build_dataloaders(
         elif args.eval_hidden_states_path is not None:
             eval_eagle3_dataset = build_offline_eagle3_dataset(
                 args.eval_hidden_states_path,
-                args.max_length,
+                dataset_max_length,
                 ttt_length=args.ttt_length,
                 use_usp_preprocess=(args.attention_backend == "usp"),
             )
@@ -639,10 +690,14 @@ def run_forward(
             loss_mask = get_dp_data_shard_from_tp(eagle3_data.loss_mask)
             target = get_dp_data_shard_from_tp(eagle3_data.target)
             hidden_states = get_dp_data_shard_from_tp(eagle3_data.hidden_states)
+            future_hidden_states = get_dp_data_shard_from_tp(
+                eagle3_data.future_hidden_states
+            )
         else:
             # we generate the logits using the hidden states loaded from disk
             attention_mask = data["attention_mask"].cuda()
             hidden_states = data["hidden_state"].cuda()
+            future_hidden_states = None
             input_ids, target, loss_mask = target_model.preprocess(
                 data["input_ids"], data["target"], data["loss_mask"]
             )
@@ -657,6 +712,7 @@ def run_forward(
             loss_mask=loss_mask,
             target=target,
             hidden_states=hidden_states,
+            future_hidden_states=future_hidden_states,
             position_ids=(
                 data["position_ids"].cuda() if "position_ids" in data else None
             ),
@@ -716,10 +772,12 @@ def record_metrcs(
     tracker.log(logdict, step=global_step)
 
 
-def get_dp_data_shard_from_tp(tensor: torch.Tensor) -> torch.Tensor:
+def get_dp_data_shard_from_tp(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     """
     Get the data shard from the tensor.
     """
+    if tensor is None:
+        return None
     tp_size = dist.get_world_size(get_tp_group())
     tp_rank = dist.get_rank(get_tp_group())
     return tensor.chunk(tp_size, dim=0)[tp_rank]
@@ -750,6 +808,16 @@ def main():
     # ================================================
     draft_model_config, draft_model, ckpt_info, resume_state = build_draft_model(args)
     target_model, processor = build_target_model(args, draft_model_config, is_online)
+    if args.enable_future_hidden and hasattr(target_model, "configure_future_hidden"):
+        future_mask_token_id = resolve_future_mask_token_id(args)
+        target_model.configure_future_hidden(
+            future_hidden_token_id=future_mask_token_id,
+            future_hidden_length=args.ttt_length,
+        )
+        print_on_rank0(
+            f"Using future hidden mask token id: {future_mask_token_id}, "
+            f"future_hidden_length={args.ttt_length}"
+        )
 
     # ================================================
     # 3. Build dataloader

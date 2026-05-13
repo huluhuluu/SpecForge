@@ -136,6 +136,7 @@ class OnlineEagle3Model(Eagle3Model):
         target: torch.Tensor,
         loss_mask: torch.Tensor,
         hidden_states: torch.Tensor,
+        future_hidden_states: Optional[torch.Tensor] = None,
         past_key_values: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         position_ids: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
@@ -234,11 +235,22 @@ class OnlineEagle3Model(Eagle3Model):
             # Step 5.1: embed the input ids
             inputs_embeds = self.draft_model.embed_input_ids(state.input_ids)
             inputs_embeds = inputs_embeds.to(hidden_states.dtype)
+            step_future_hidden_states = None
+            if future_hidden_states is not None:
+                if future_hidden_states.size(1) < self.length:
+                    raise ValueError(
+                        f"Expected future_hidden_states to have at least {self.length} steps, "
+                        f"got shape {tuple(future_hidden_states.shape)}"
+                    )
+                step_future_hidden_states = self.draft_model.project_future_hidden_states(
+                    future_hidden_states[:, idx, :]
+                )
 
             # Step 5.2: run the draft model backbone
             hidden_states_out = self.draft_model.backbone(
                 input_embeds=inputs_embeds,
                 hidden_states=state.hidden_states,
+                future_hidden_states=step_future_hidden_states,
                 cache_hidden=cache_hidden,
                 attention_mask=state.attention_mask,
                 position_ids=state.position_ids,
@@ -528,6 +540,7 @@ class QwenVLOnlineEagle3Model(Eagle3Model):
             hidden_states_out = self.draft_model.backbone(
                 input_embeds=inputs_embeds,
                 hidden_states=hidden_states,
+                future_hidden_states=None,
                 cache_hidden=cache_hidden,
                 attention_mask=attention_mask,
                 position_ids=position_ids,

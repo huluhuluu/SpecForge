@@ -47,6 +47,7 @@ class Eagle3TargetOutput:
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
     last_hidden_states: Optional[torch.Tensor] = None
+    future_hidden_states: Optional[torch.Tensor] = None
 
 
 class Eagle3TargetModel(ABC):
@@ -59,6 +60,21 @@ class Eagle3TargetModel(ABC):
 
     def __init__(self):
         self.aux_hidden_states_layers = None
+        self.future_hidden_token_id: Optional[int] = None
+        self.future_hidden_length: int = 0
+
+    def _get_model_config(self):
+        if hasattr(self, "model") and hasattr(self.model, "config"):
+            return self.model.config
+        if hasattr(self, "hf_config") and self.hf_config is not None:
+            return self.hf_config
+        if (
+            hasattr(self, "model_runner")
+            and hasattr(self.model_runner, "model_config")
+            and hasattr(self.model_runner.model_config, "hf_config")
+        ):
+            return self.model_runner.model_config.hf_config
+        raise ValueError("Failed to resolve target model config.")
 
     @classmethod
     @abstractmethod
@@ -92,11 +108,12 @@ class Eagle3TargetModel(ABC):
         Set the layers to capture the aux hidden states from the target model outputs.
         """
         if aux_hidden_states_layers is None:
-            if hasattr(self.model.config, "num_hidden_layers"):
-                num_layers = self.model.config.num_hidden_layers
+            model_config = self._get_model_config()
+            if hasattr(model_config, "num_hidden_layers"):
+                num_layers = model_config.num_hidden_layers
             else:
                 raise ValueError(
-                    f"Failed to set aux hidden states layers as model config {self.model.config} does not have num_hidden_layers"
+                    f"Failed to set aux hidden states layers as model config {model_config} does not have num_hidden_layers"
                 )
             aux_hidden_states_layers = [
                 1,
@@ -107,6 +124,77 @@ class Eagle3TargetModel(ABC):
         assert (
             len(self.aux_hidden_states_layers) == 3
         ), "aux_hidden_states_layers is expected to be 3 layers for EAGLE3"
+
+    def set_future_hidden_token_id(self, future_hidden_token_id: Optional[int]) -> None:
+        self.future_hidden_token_id = future_hidden_token_id
+
+    def set_future_hidden_length(self, future_hidden_length: int) -> None:
+        self.future_hidden_length = future_hidden_length
+
+    def configure_future_hidden(
+        self,
+        future_hidden_token_id: Optional[int],
+        future_hidden_length: int,
+    ) -> None:
+        self.set_future_hidden_token_id(future_hidden_token_id)
+        self.set_future_hidden_length(future_hidden_length)
+
+    def _future_hidden_enabled(self) -> bool:
+        return (
+            self.future_hidden_token_id is not None and self.future_hidden_length > 0
+        )
+
+    def _build_future_hidden_inputs(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, List[List[int]], List[int]]]:
+        if not self._future_hidden_enabled():
+            return None
+
+        num_mask_slots = max(self.future_hidden_length - 1, 0)
+        seq_lens = attention_mask.sum(dim=-1).to(dtype=torch.long).tolist()
+        augmented_seq_len = max(seq_lens) + num_mask_slots
+        model_config = self._get_model_config()
+        pad_token_id = getattr(model_config, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = self.future_hidden_token_id
+
+        augmented_input_ids = input_ids.new_full(
+            (input_ids.shape[0], augmented_seq_len), pad_token_id
+        )
+        augmented_attention_mask = attention_mask.new_zeros(
+            (attention_mask.shape[0], augmented_seq_len)
+        )
+        future_positions = []
+
+        for row_idx, seq_len in enumerate(seq_lens):
+            if seq_len <= 0:
+                raise ValueError("Encountered an empty sequence while building future hidden inputs.")
+            augmented_input_ids[row_idx, :seq_len] = input_ids[row_idx, :seq_len]
+            if num_mask_slots > 0:
+                augmented_input_ids[
+                    row_idx, seq_len : seq_len + num_mask_slots
+                ] = self.future_hidden_token_id
+            augmented_attention_mask[row_idx, : seq_len + num_mask_slots] = 1
+            future_positions.append(
+                [seq_len - 1] + [seq_len + offset for offset in range(num_mask_slots)]
+            )
+
+        return augmented_input_ids, augmented_attention_mask, future_positions, seq_lens
+
+    @staticmethod
+    def _gather_future_hidden_states(
+        last_hidden_states, future_positions: List[List[int]]
+    ) -> torch.Tensor:
+        gathered = []
+        for sample_hidden_states, sample_positions in zip(
+            last_hidden_states, future_positions
+        ):
+            if sample_hidden_states.dim() == 3:
+                sample_hidden_states = sample_hidden_states.squeeze(0)
+            gathered.append(sample_hidden_states[sample_positions].unsqueeze(0))
+        return torch.cat(gathered, dim=0)
 
 
 class HFEagle3TargetModel(Eagle3TargetModel):
@@ -239,6 +327,29 @@ class HFEagle3TargetModel(Eagle3TargetModel):
             (hidden_states0, hidden_states1, hidden_states2), dim=-1
         )
 
+        future_hidden_states = None
+        future_hidden_inputs = self._build_future_hidden_inputs(
+            input_ids, attention_mask
+        )
+        if future_hidden_inputs is not None:
+            (
+                augmented_input_ids,
+                augmented_attention_mask,
+                future_positions,
+                _,
+            ) = future_hidden_inputs
+            future_outputs = self.model(
+                input_ids=augmented_input_ids,
+                attention_mask=augmented_attention_mask,
+                output_hidden_states=True,
+                output_attentions=False,
+                output_router_logits=False,
+                use_cache=False,
+            )
+            future_hidden_states = self._gather_future_hidden_states(
+                future_outputs.hidden_states[-1], future_positions
+            )
+
         # apply pading
         target = outputs.logits
         target = padding(target, left=False)
@@ -251,6 +362,7 @@ class HFEagle3TargetModel(Eagle3TargetModel):
             loss_mask=loss_mask,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            future_hidden_states=future_hidden_states,
         )
 
 
@@ -722,6 +834,45 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                     return_logits=True,
                 )
             )
+        future_hidden_states_out = None
+        future_hidden_inputs = None
+        if not is_vlm:
+            future_hidden_inputs = self._build_future_hidden_inputs(
+                input_ids, attention_mask
+            )
+            if future_hidden_inputs is not None:
+                (
+                    augmented_input_ids,
+                    augmented_attention_mask,
+                    future_positions,
+                    seq_lens,
+                ) = future_hidden_inputs
+                augmented_input_ids_list = [
+                    augmented_input_ids[idx : idx + 1, : seq_len + self.future_hidden_length - 1]
+                    for idx, seq_len in enumerate(seq_lens)
+                ]
+                augmented_attention_mask_list = [
+                    augmented_attention_mask[
+                        idx : idx + 1, : seq_len + self.future_hidden_length - 1
+                    ]
+                    for idx, seq_len in enumerate(seq_lens)
+                ]
+                (
+                    _,
+                    _,
+                    _,
+                    future_last_hidden_states_list,
+                ) = self.extend(
+                    augmented_input_ids_list,
+                    augmented_attention_mask_list,
+                    augmented_attention_mask_list,
+                    return_last_hidden_states=True,
+                    return_logits=False,
+                )
+                future_hidden_states_out = self._gather_future_hidden_states(
+                    future_last_hidden_states_list,
+                    future_positions,
+                )
         aux_hidden_states_out = []
         target_out = []
         loss_mask_out = []
@@ -775,6 +926,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             input_ids=input_ids_out,
             attention_mask=attention_mask,
             last_hidden_states=last_hidden_states_out,
+            future_hidden_states=future_hidden_states_out,
         )
 
 
@@ -823,6 +975,27 @@ class CustomEagle3TargetModel(Eagle3TargetModel):
         # returning the requested layers in `outputs.hidden_states`.
         hidden_states = torch.cat(outputs.hidden_states, dim=-1)
 
+        future_hidden_states = None
+        future_hidden_inputs = self._build_future_hidden_inputs(
+            input_ids, attention_mask
+        )
+        if future_hidden_inputs is not None:
+            (
+                augmented_input_ids,
+                augmented_attention_mask,
+                future_positions,
+                _,
+            ) = future_hidden_inputs
+            future_outputs = self.model(
+                input_ids=augmented_input_ids,
+                attention_mask=augmented_attention_mask,
+                output_hidden_states=False,
+                use_cache=False,
+            )
+            future_hidden_states = self._gather_future_hidden_states(
+                future_outputs.last_hidden_state, future_positions
+            )
+
         target = outputs.logits
         target = padding(target, left=False)
         input_ids = padding(input_ids, left=False)
@@ -834,6 +1007,7 @@ class CustomEagle3TargetModel(Eagle3TargetModel):
             loss_mask=loss_mask,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            future_hidden_states=future_hidden_states,
         )
 
 

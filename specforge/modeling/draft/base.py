@@ -59,6 +59,14 @@ class Eagle3DraftModel(PreTrainedModel, ABC):
         Compute the logits of the draft model.
         """
 
+    def project_future_hidden_states(
+        self, future_hidden_states: Optional[torch.Tensor]
+    ) -> Optional[torch.Tensor]:
+        """
+        Project the step-level future hidden states to the draft hidden size when enabled.
+        """
+        return future_hidden_states
+
     def prepare_decoder_attention_mask(
         self,
         attention_mask: torch.Tensor,
@@ -98,6 +106,7 @@ class Eagle3DraftModel(PreTrainedModel, ABC):
         self,
         input_embeds: torch.Tensor,
         hidden_states: torch.Tensor,
+        future_hidden_states: Optional[torch.Tensor],
         cache_hidden: torch.Tensor,
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,

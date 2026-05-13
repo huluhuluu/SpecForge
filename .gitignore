@@ -193,9 +193,13 @@ cython_debug/
 .cursorindexingignore
 cache/
 outputs/
+outputs-backup/
 wandb/
 .idea
 .vscode/
 
 # macOS
 .DS_Store
+findings.md
+progress.md
+task_plan.md
