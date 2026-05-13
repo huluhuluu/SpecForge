@@ -133,3 +133,164 @@ In `scripts/train_eagle3.py`, both training and evaluation datasets are changed 
 - `draft_sliding_window`
 
 The goal is to reduce cache collisions across different training configurations.
+
+## 4. Modify Notes
+
+<details>
+<summary>English Modification Notes</summary>
+
+This branch implements sliding-window attention for the Eagle3 draft model and wires the window size from the launch script to the actual attention masking logic used during training.
+
+### 4.1 Launch Script and Config Entry
+
+Code references:
+
+- `examples/run_qwen3_1.7b_eagle3_online_sw256.sh`
+- `configs/qwen3-1.7b-eagle3.json`
+
+Key changes:
+
+- the new launch script passes:
+  - `--draft-sliding-window 256`
+  - `--ttt-length 7`
+  - `--attention-backend sdpa`
+- the launch script uses explicit:
+  - `MASTER_ADDR`
+  - `MASTER_PORT`
+  - `torchrun`
+- the draft config file includes:
+  - `sliding_window`
+  - `use_sliding_window`
+
+This means the sliding-window behavior is no longer only a documentation-level setting. It is represented both in the launch entry and in the draft config schema.
+
+### 4.2 Training Entry Changes
+
+Code references in `scripts/train_eagle3.py`:
+
+- `139`
+  add `--draft-sliding-window`
+- `413-419`
+  when the CLI value is provided:
+  - set `draft_model_config.sliding_window = args.draft_sliding_window`
+  - set `draft_model_config.use_sliding_window = True`
+- `465-473`
+  include the following values in the dataset cache key:
+  - `train_data_path`
+  - `max_length`
+  - `chat_template`
+  - `target_model_path`
+  - `attention_backend`
+  - `draft_sliding_window`
+  - the explicit cache version suffix `jsonl-loader-v2`
+- `475-477`
+  load online training rows from JSONL directly and build `Dataset.from_list(...)`
+
+This ensures:
+
+- the window size is actually written into the draft model config before model construction
+- different sliding-window settings do not accidentally reuse the same cached dataset
+- multi-rank online data loading uses a more stable JSONL-to-list path
+
+### 4.3 Draft Base Abstraction Changes
+
+Code references in `specforge/modeling/draft/base.py`:
+
+- `44-48`
+  add `get_sliding_window()`
+- `68-128`
+  extend `prepare_decoder_attention_mask(...)` with sliding-window bias logic
+
+The new base-level behavior is:
+
+1. build the standard causal mask
+2. merge the padding mask
+3. if sliding window is enabled, compute:
+
+```text
+lower_bound = query_position - sliding_window + 1
+```
+
+4. mask out all keys with `key_position < lower_bound`
+5. add the resulting bias to the combined attention mask
+
+This gives the draft model a single shared access path for sliding-window masking in the standard decoder mask flow.
+
+### 4.4 SDPA Attention Path Changes
+
+Code references in `specforge/modeling/draft/llama3_eagle.py`:
+
+- `560-571`
+  build the out-of-window bias in `_apply_sliding_window_bias(...)`
+- `705-718`
+  apply the sliding-window-adjusted mask to the standard `scaled_dot_product_attention(...)` path
+- `757-760`
+  reuse the same sliding-window bias when the Eagle3 training path uses `cache_hidden`
+
+This is the key behavior for the current training setup because the branch uses:
+
+- `--attention-backend sdpa`
+
+So the effective rule becomes:
+
+- each token can attend only to the most recent `sliding_window` previous tokens
+- this applies both to the normal SDPA forward path and to the Eagle3-specific cache-based attention path
+
+### 4.5 FlexAttention Path Changes
+
+Code references in `specforge/modeling/draft/flex_attention.py`:
+
+- `108-142`
+  extend `generate_eagle3_mask(...)` with `sliding_window`
+
+The FlexAttention path now truncates:
+
+- the causal region
+- the suffix region
+
+using the same sliding-window rule.
+
+This keeps attention semantics aligned across backends instead of making sliding-window support SDPA-only.
+
+### 4.6 Tests
+
+Code references:
+
+- `tests/test_modeling/test_draft/test_llama3.py:130-145`
+- `tests/test_utils/test_flex_attention.py:148-164`
+
+Added coverage:
+
+- verify that `sliding_window` is correctly loaded from config into the draft attention module
+- verify that the generated Eagle3 flex mask actually blocks tokens outside the sliding window
+
+This confirms both:
+
+- config propagation
+- mask semantics
+
+### 4.7 End-to-End Effect
+
+With:
+
+- `draft_sliding_window = 256`
+- `max_length = 2048`
+- `ttt_length = 7`
+
+the training flow behaves as follows:
+
+1. the launch script passes `--draft-sliding-window 256`
+2. `train_eagle3.py` writes that value into the draft config
+3. the draft model reads `use_sliding_window=True`
+4. the draft attention layer constructs a windowed attention bias
+5. all key positions earlier than `query_position - 255` are masked out
+6. the Eagle3 training loop therefore uses a constrained local attention range instead of full causal visibility
+
+That is the concrete implementation of this branch’s goal:
+
+- expose sliding-window as a training parameter
+- propagate it into the draft model config
+- enforce it in real draft attention computation
+- keep SDPA and FlexAttention behavior consistent
+
+</details>
