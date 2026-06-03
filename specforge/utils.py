@@ -119,7 +119,11 @@ def get_last_checkpoint(folder, prefix="epoch"):
 
 
 def generate_draft_model_config(
-    target_model_path: str, template_config_path: str = None, cache_dir: str = None
+    target_model_path: str,
+    template_config_path: str = None,
+    cache_dir: str = None,
+    num_draft_layers: int = 1,
+    draft_sliding_window: int = None,
 ):
     """
     Auto-generate draft model config based on target model parameters aligned with template config
@@ -128,6 +132,8 @@ def generate_draft_model_config(
         target_model_path (str): Path to the target model
         template_config_path (str, optional): Template config file path, defaults to llama3-8B-eagle3.json
         cache_dir (str, optional): Cache directory
+        num_draft_layers (int): Number of transformer layers in the draft model
+        draft_sliding_window (int, optional): Sliding window size for draft attention
 
     Returns:
         dict: Generated draft model config dictionary
@@ -137,11 +143,7 @@ def generate_draft_model_config(
 
     # If no template specified, use default llama3-8B-eagle3.json
     if template_config_path is None:
-        # Use the script execution directory as base
-        import sys
-
-        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        project_root = os.path.dirname(script_dir)  # Go up one level from scripts/
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         template_config_path = os.path.join(
             project_root, "configs", "llama3-8B-eagle3.json"
         )
@@ -180,8 +182,11 @@ def generate_draft_model_config(
             draft_config[draft_param] = value
 
     # Special handling for some parameters
-    # Ensure num_hidden_layers is always 1 (EAGLE3 feature)
-    draft_config["num_hidden_layers"] = 1
+    draft_config["num_hidden_layers"] = num_draft_layers
+    if draft_sliding_window is not None:
+        draft_config["sliding_window"] = draft_sliding_window
+        draft_config["use_sliding_window"] = draft_sliding_window > 0
+        draft_config["max_window_layers"] = num_draft_layers
 
     # Keep some fixed draft model specific parameters
     draft_config["tie_word_embeddings"] = False
@@ -215,6 +220,8 @@ def create_draft_config_from_target(
     output_dir: str = None,
     template_config_path: str = None,
     cache_dir: str = None,
+    num_draft_layers: int = 1,
+    draft_sliding_window: int = None,
 ):
     """
     Convenient function to create draft model config file from target model
@@ -224,6 +231,8 @@ def create_draft_config_from_target(
         output_dir (str, optional): Output directory, defaults to configs folder in current directory
         template_config_path (str, optional): Template config path
         cache_dir (str, optional): Cache directory
+        num_draft_layers (int): Number of transformer layers in the draft model
+        draft_sliding_window (int, optional): Sliding window size for draft attention
 
     Returns:
         str: Generated config file path
@@ -236,17 +245,17 @@ def create_draft_config_from_target(
             "No draft model config provided, auto-generating from target model..."
         )
         config_dict = generate_draft_model_config(
-            target_model_path, template_config_path, cache_dir
+            target_model_path,
+            template_config_path,
+            cache_dir,
+            num_draft_layers=num_draft_layers,
+            draft_sliding_window=draft_sliding_window,
         )
     dist.barrier()
 
     # Determine output path
     if output_dir is None:
-        # Use the script execution directory as base
-        import sys
-
-        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        project_root = os.path.dirname(script_dir)  # Go up one level from scripts/
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         output_dir = os.path.join(project_root, "configs")
 
     # Extract model name from model path

@@ -76,6 +76,12 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
         help="Draft model config path. If not provided, will auto-generate from target model.",
     )
     model_group.add_argument(
+        "--num-draft-layers",
+        type=int,
+        default=1,
+        help="Number of transformer layers in the auto-generated draft model config.",
+    )
+    model_group.add_argument(
         "--embedding-key",
         type=str,
         default="model.embed_tokens.weight",
@@ -381,7 +387,10 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
     if args.draft_model_config is None:
         # Auto-generate and save config file
         auto_config_path = create_draft_config_from_target(
-            target_model_path=args.target_model_path, cache_dir=args.model_download_dir
+            target_model_path=args.target_model_path,
+            cache_dir=args.model_download_dir,
+            num_draft_layers=args.num_draft_layers,
+            draft_sliding_window=args.draft_sliding_window,
         )
         draft_model_config = AutoDraftModelConfig.from_file(auto_config_path)
     else:
