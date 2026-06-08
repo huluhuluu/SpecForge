@@ -124,6 +124,7 @@ def generate_draft_model_config(
     cache_dir: str = None,
     num_draft_layers: int = 1,
     draft_sliding_window: int = None,
+    draft_attention_type: str = "target",
 ):
     """
     Auto-generate draft model config based on target model parameters aligned with template config
@@ -134,6 +135,8 @@ def generate_draft_model_config(
         cache_dir (str, optional): Cache directory
         num_draft_layers (int): Number of transformer layers in the draft model
         draft_sliding_window (int, optional): Sliding window size for draft attention
+        draft_attention_type (str): Draft attention structure. "target" preserves the
+            target model KV-head layout; "mha" uses one KV head per attention head.
 
     Returns:
         dict: Generated draft model config dictionary
@@ -181,6 +184,11 @@ def generate_draft_model_config(
                 value = str(value).replace("torch.", "")
             draft_config[draft_param] = value
 
+    if draft_attention_type == "mha":
+        draft_config["num_key_value_heads"] = draft_config["num_attention_heads"]
+    elif draft_attention_type != "target":
+        raise ValueError(f"Unknown draft_attention_type: {draft_attention_type}")
+
     # Special handling for some parameters
     draft_config["num_hidden_layers"] = num_draft_layers
     if draft_sliding_window is not None:
@@ -222,6 +230,7 @@ def create_draft_config_from_target(
     cache_dir: str = None,
     num_draft_layers: int = 1,
     draft_sliding_window: int = None,
+    draft_attention_type: str = "target",
 ):
     """
     Convenient function to create draft model config file from target model
@@ -233,6 +242,8 @@ def create_draft_config_from_target(
         cache_dir (str, optional): Cache directory
         num_draft_layers (int): Number of transformer layers in the draft model
         draft_sliding_window (int, optional): Sliding window size for draft attention
+        draft_attention_type (str): Draft attention structure. "target" preserves the
+            target model KV-head layout; "mha" uses one KV head per attention head.
 
     Returns:
         str: Generated config file path
@@ -250,6 +261,7 @@ def create_draft_config_from_target(
             cache_dir,
             num_draft_layers=num_draft_layers,
             draft_sliding_window=draft_sliding_window,
+            draft_attention_type=draft_attention_type,
         )
     dist.barrier()
 

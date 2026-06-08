@@ -16,7 +16,12 @@ from torch.distributed.fsdp import MixedPrecision, ShardingStrategy, StateDictTy
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoProcessor, AutoTokenizer
+try:
+    from transformers import AutoProcessor, AutoTokenizer
+except ImportError:
+    from transformers import AutoTokenizer
+
+    AutoProcessor = None
 
 from datasets import Dataset
 from specforge import (
@@ -80,6 +85,16 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
         type=int,
         default=1,
         help="Number of transformer layers in the auto-generated draft model config.",
+    )
+    model_group.add_argument(
+        "--draft-attention-type",
+        type=str,
+        default="target",
+        choices=["target", "mha"],
+        help=(
+            "Attention structure for the auto-generated draft model config. "
+            "'target' preserves the target model KV-head layout; 'mha' uses one KV head per attention head."
+        ),
     )
     model_group.add_argument(
         "--embedding-key",
@@ -321,6 +336,10 @@ def build_target_model(
             target_model.set_aux_hidden_states_layers()
 
         if args.is_vlm:
+            if AutoProcessor is None:
+                raise ImportError(
+                    "AutoProcessor is not available in this transformers build, but is required for VLM training."
+                )
             processor = AutoProcessor.from_pretrained(
                 args.target_model_path,
                 min_pixels=args.min_pixels,
@@ -391,6 +410,7 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
             cache_dir=args.model_download_dir,
             num_draft_layers=args.num_draft_layers,
             draft_sliding_window=args.draft_sliding_window,
+            draft_attention_type=args.draft_attention_type,
         )
         draft_model_config = AutoDraftModelConfig.from_file(auto_config_path)
     else:
