@@ -49,6 +49,25 @@ class Eagle3TargetOutput:
     last_hidden_states: Optional[torch.Tensor] = None
 
 
+def get_uniform_eagle3_aux_hidden_state_layers(
+    num_hidden_layers: int,
+) -> List[int]:
+    """
+    Pick three layer ids that are evenly spaced across the target stack.
+    """
+    if num_hidden_layers < 5:
+        raise ValueError(
+            f"Expected at least 5 hidden layers, got {num_hidden_layers}"
+        )
+
+    start = 1
+    end = num_hidden_layers - 4
+    layers = torch.linspace(start, end, steps=3).round().to(torch.int64).tolist()
+    layers[0] = start
+    layers[-1] = end
+    return layers
+
+
 class Eagle3TargetModel(ABC):
     """
     This  offers a layer of abstraction for the target model backend. The user can choose different backends to suit their needs:
@@ -59,6 +78,25 @@ class Eagle3TargetModel(ABC):
 
     def __init__(self):
         self.aux_hidden_states_layers = None
+
+    def get_num_hidden_layers(self) -> int:
+        """
+        Resolve the number of transformer layers for the underlying target model.
+        """
+        candidates = [
+            getattr(getattr(self, "model", None), "config", None),
+            getattr(self, "hf_config", None),
+            getattr(getattr(self, "model_runner", None), "model_config", None),
+            getattr(
+                getattr(getattr(self, "model_runner", None), "model_config", None),
+                "hf_config",
+                None,
+            ),
+        ]
+        for candidate in candidates:
+            if candidate is not None and hasattr(candidate, "num_hidden_layers"):
+                return int(candidate.num_hidden_layers)
+        raise ValueError("Could not determine num_hidden_layers for Eagle3 target model")
 
     @classmethod
     @abstractmethod
@@ -92,12 +130,7 @@ class Eagle3TargetModel(ABC):
         Set the layers to capture the aux hidden states from the target model outputs.
         """
         if aux_hidden_states_layers is None:
-            if hasattr(self.model.config, "num_hidden_layers"):
-                num_layers = self.model.config.num_hidden_layers
-            else:
-                raise ValueError(
-                    f"Failed to set aux hidden states layers as model config {self.model.config} does not have num_hidden_layers"
-                )
+            num_layers = self.get_num_hidden_layers()
             aux_hidden_states_layers = [
                 1,
                 num_layers // 2 - 1,

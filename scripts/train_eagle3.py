@@ -48,6 +48,7 @@ from specforge.modeling.target import (
     Eagle3TargetModel,
     TargetHead,
     get_eagle3_target_model,
+    get_uniform_eagle3_aux_hidden_state_layers,
 )
 from specforge.optimizer import BF16Optimizer
 from specforge.tracker import Tracker, create_tracker, get_tracker_class
@@ -110,6 +111,11 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
     )
     model_group.add_argument(
         "--is-vlm", action="store_true", help="Whether the target model is a VLM"
+    )
+    model_group.add_argument(
+        "--uniform-aux-hidden-state-layers",
+        action="store_true",
+        help="Ignore config-provided aux layer ids and use uniformly spaced target layers.",
     )
     model_group.add_argument(
         "--target-model-backend",
@@ -324,7 +330,13 @@ def build_target_model(
             )
 
         # set the aux hidden states layers
-        if (
+        if args.uniform_aux_hidden_state_layers:
+            target_model.set_aux_hidden_states_layers(
+                get_uniform_eagle3_aux_hidden_state_layers(
+                    target_model.get_num_hidden_layers()
+                )
+            )
+        elif (
             hasattr(draft_model_config, "eagle_config")
             and draft_model_config.eagle_config is not None
             and "eagle_aux_hidden_state_layer_ids" in draft_model_config.eagle_config

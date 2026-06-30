@@ -3,6 +3,7 @@ from .eagle3_target_model import (
     Eagle3TargetModel,
     HFEagle3TargetModel,
     SGLangEagle3TargetModel,
+    get_uniform_eagle3_aux_hidden_state_layers,
     get_eagle3_target_model,
 )
 from .target_head import TargetHead
@@ -12,6 +13,7 @@ __all__ = [
     "SGLangEagle3TargetModel",
     "HFEagle3TargetModel",
     "CustomEagle3TargetModel",
+    "get_uniform_eagle3_aux_hidden_state_layers",
     "get_eagle3_target_model",
     "TargetHead",
 ]

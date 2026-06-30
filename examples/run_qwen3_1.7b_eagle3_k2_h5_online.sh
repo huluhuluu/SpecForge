@@ -18,8 +18,7 @@ export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
 NUM_GPUS=${1:-4}
 TP_SIZE=${2:-1}
-NUM_DRAFT_LAYERS=${NUM_DRAFT_LAYERS:-2}
-DRAFT_SLIDING_WINDOW=${DRAFT_SLIDING_WINDOW:-256}
+NUM_DRAFT_LAYERS=${NUM_DRAFT_LAYERS:-5}
 BUILD_DATASET_NUM_PROC=${BUILD_DATASET_NUM_PROC:-64}
 RESUME=${RESUME:-false}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
@@ -37,10 +36,9 @@ torchrun \
     "$ROOT_DIR/scripts/train_eagle3.py" \
     --target-model-path /data/HUGGINGFACE/Qwen3-1.7B \
     --num-draft-layers "$NUM_DRAFT_LAYERS" \
-    --draft-sliding-window "$DRAFT_SLIDING_WINDOW" \
     --train-data-path /data/HUGGINGFACE/data/specforge_sharegpt/sharegpt_train.jsonl \
     --build-dataset-num-proc "$BUILD_DATASET_NUM_PROC" \
-    --output-dir "$ROOT_DIR/outputs/qwen3-1.7b-eagle3-k${NUM_DRAFT_LAYERS}-sw${DRAFT_SLIDING_WINDOW}-sharegpt" \
+    --output-dir "$ROOT_DIR/outputs/qwen3-1.7b-eagle3-k${NUM_DRAFT_LAYERS}-uniform-sharegpt" \
     --num-epochs 10 \
     --batch-size 1 \
     --learning-rate 1e-4 \
@@ -53,4 +51,5 @@ torchrun \
     --target-model-backend sglang \
     --sglang-mem-fraction-static 0.2 \
     --ttt-length 5 \
+    --uniform-aux-hidden-state-layers \
     "${RESUME_ARGS[@]}"
